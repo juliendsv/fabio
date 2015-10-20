@@ -1,6 +1,7 @@
 package route
 
 import (
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -39,17 +40,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if p.cfg.ClientIPHeader != "" {
-		ip, _, err := net.SplitHostPort(req.RemoteAddr)
-		if err != nil {
-			http.Error(w, "cannot parse "+req.RemoteAddr, http.StatusInternalServerError)
-			return
-		}
-		req.Header.Set(p.cfg.ClientIPHeader, ip)
-	}
-
-	if p.cfg.TLSHeader != "" && req.TLS != nil {
-		req.Header.Set(p.cfg.TLSHeader, p.cfg.TLSHeaderValue)
+	if err := addHeaders(req, p.cfg); err != nil {
+		http.Error(w, "cannot parse "+req.RemoteAddr, http.StatusInternalServerError)
+		return
 	}
 
 	start := time.Now()
@@ -58,4 +51,40 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	rp.ServeHTTP(w, req)
 	target.timer.UpdateSince(start)
 	p.requests.UpdateSince(start)
+}
+
+func addHeaders(r *http.Request, cfg config.Proxy) error {
+	remoteIP, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return errors.New("cannot parse " + r.RemoteAddr)
+	}
+
+	if cfg.ClientIPHeader != "" {
+		r.Header.Set(cfg.ClientIPHeader, remoteIP)
+	}
+
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff != "" && cfg.LocalIP != "" {
+		r.Header.Set("X-Forwarded-For", xff+", "+cfg.LocalIP)
+	}
+
+	fwd := r.Header.Get("Forwarded")
+	if fwd == "" {
+		fwd = "for=" + remoteIP
+		if r.TLS != nil {
+			fwd += "; proto=https"
+		} else {
+			fwd += "; proto=http"
+		}
+	}
+	if cfg.LocalIP != "" {
+		fwd += "; by=" + cfg.LocalIP
+	}
+	r.Header.Set("Forwarded", fwd)
+
+	if cfg.TLSHeader != "" && r.TLS != nil {
+		r.Header.Set(cfg.TLSHeader, cfg.TLSHeaderValue)
+	}
+
+	return nil
 }
